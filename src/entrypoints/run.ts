@@ -7,11 +7,9 @@
  */
 
 import * as core from "@actions/core";
-import { dirname } from "path";
-import { spawn } from "child_process";
 import { appendFile } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
-import { setupGitHubToken, WorkflowValidationSkipError } from "../github/token";
+import { setupGitHubToken } from "../github/token";
 import { checkWritePermissions } from "../github/validation/permissions";
 import { createOctokit } from "../github/api/client";
 import type { Octokits } from "../github/api/client";
@@ -26,72 +24,11 @@ import { updateCommentLink } from "./update-comment-link";
 import { formatTurnsFromData } from "./format-turns";
 import type { Turn } from "./format-turns";
 // Base-action imports (used directly instead of subprocess)
-import { validateEnvironmentVariables } from "../../base-action/src/validate-env";
 import { setupClaudeCodeSettings } from "../../base-action/src/setup-claude-code-settings";
 import { installPlugins } from "../../base-action/src/install-plugins";
 import { preparePrompt } from "../../base-action/src/prepare-prompt";
 import { runClaude } from "../../base-action/src/run-claude";
 import type { ClaudeRunResult } from "../../base-action/src/run-claude-sdk";
-
-/**
- * Install Claude Code CLI, handling retry logic and custom executable paths.
- */
-async function installClaudeCode(): Promise<void> {
-  const customExecutable = process.env.PATH_TO_CLAUDE_CODE_EXECUTABLE;
-  if (customExecutable) {
-    console.log(`Using custom Claude Code executable: ${customExecutable}`);
-    const claudeDir = dirname(customExecutable);
-    // Add to PATH by appending to GITHUB_PATH
-    const githubPath = process.env.GITHUB_PATH;
-    if (githubPath) {
-      await appendFile(githubPath, `${claudeDir}\n`);
-    }
-    // Also add to current process PATH
-    process.env.PATH = `${claudeDir}:${process.env.PATH}`;
-    return;
-  }
-
-  const claudeCodeVersion = "2.1.63";
-  console.log(`Installing Claude Code v${claudeCodeVersion}...`);
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`Installation attempt ${attempt}...`);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(
-          "bash",
-          [
-            "-c",
-            `curl -fsSL https://claude.ai/install.sh | bash -s -- ${claudeCodeVersion}`,
-          ],
-          { stdio: "inherit" },
-        );
-        child.on("close", (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`Install failed with exit code ${code}`));
-        });
-        child.on("error", reject);
-      });
-      console.log("Claude Code installed successfully");
-      // Add to PATH
-      const homeBin = `${process.env.HOME}/.local/bin`;
-      const githubPath = process.env.GITHUB_PATH;
-      if (githubPath) {
-        await appendFile(githubPath, `${homeBin}\n`);
-      }
-      process.env.PATH = `${homeBin}:${process.env.PATH}`;
-      return;
-    } catch (error) {
-      if (attempt === 3) {
-        throw new Error(
-          `Failed to install Claude Code after 3 attempts: ${error}`,
-        );
-      }
-      console.log("Installation failed, retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-  }
-}
 
 /**
  * Write the step summary from Claude's execution output file.
@@ -145,16 +82,7 @@ async function run() {
       `Auto-detected mode: ${modeName} for event: ${context.eventName}`,
     );
 
-    try {
-      githubToken = await setupGitHubToken();
-    } catch (error) {
-      if (error instanceof WorkflowValidationSkipError) {
-        core.setOutput("skipped_due_to_workflow_validation_mismatch", "true");
-        console.log("Exiting due to workflow validation skip");
-        return;
-      }
-      throw error;
-    }
+    githubToken = setupGitHubToken();
 
     octokit = createOctokit(githubToken);
 
@@ -206,16 +134,12 @@ async function run() {
     baseBranch = prepareResult.branchInfo.baseBranch;
     prepareCompleted = true;
 
-    // Phase 2: Install Claude Code CLI
-    await installClaudeCode();
-
-    // Phase 3: Run Claude (import base-action directly)
+    // Phase 2: Run Claude (import base-action directly)
+    // Claude CLI is assumed to be pre-installed and authenticated by the environment.
     // Set env vars needed by the base-action code
     process.env.INPUT_ACTION_INPUTS_PRESENT = actionInputsPresent;
     process.env.CLAUDE_CODE_ACTION = "1";
     process.env.DETAILED_PERMISSION_MESSAGES = "1";
-
-    validateEnvironmentVariables();
 
     await setupClaudeCodeSettings(process.env.INPUT_SETTINGS);
 
@@ -236,7 +160,6 @@ async function run() {
     const claudeResult: ClaudeRunResult = await runClaude(promptConfig.path, {
       claudeArgs: prepareResult.claudeArgs,
       appendSystemPrompt: process.env.APPEND_SYSTEM_PROMPT,
-      model: process.env.ANTHROPIC_MODEL,
       pathToClaudeCodeExecutable:
         process.env.INPUT_PATH_TO_CLAUDE_CODE_EXECUTABLE,
       showFullOutput: process.env.INPUT_SHOW_FULL_OUTPUT,
